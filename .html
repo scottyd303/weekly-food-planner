@@ -1,0 +1,143 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Weekly Food Planner v1.1</title>
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+<header class="topbar">
+  <div><h1>Weekly Food Planner <span class="version">v1.1</span></h1><p>Plan meals, shop from what you need, and use AI when you want it.</p></div>
+  <div class="ai-badge {{ 'on' if ai_enabled else 'off' }}">AI {{ 'Connected' if ai_enabled else 'Offline' }}</div>
+</header>
+<nav class="tabs">
+  <a href="#planner">Planner</a><a href="#grocery">Groceries</a><a href="#pantry">Pantry</a><a href="#recurring">Recurring</a><a href="#recipes">Recipes</a><a href="#dietitian">AI Dietitian</a><a href="#settings">Settings</a>
+</nav>
+<main>
+{% if notice %}<div class="notice banner">{{ notice }}</div>{% endif %}
+<section class="weekbar">
+  <a class="button ghost" href="/?week={{ prev_week }}">← Previous</a>
+  <div><strong>Week of {{ week_start.strftime('%B %-d, %Y') }}</strong><div class="muted">{{ settings.household_name }} · {{ settings.servings }} serving{{ '' if settings.servings == 1 else 's' }}</div></div>
+  <a class="button ghost" href="/?week={{ next_week }}">Next →</a>
+</section>
+
+<section id="planner" class="panel">
+  <div class="section-head">
+    <div><h2>Weekly planner</h2><p class="muted">Recurring meals can fill open slots. AI optimization uses nutrition targets, pantry, budget notes, and your saved recipes.</p></div>
+    <div class="actions">
+      <form method="post" action="/recurring/apply"><input type="hidden" name="week" value="{{ week_start.isoformat() }}"><button class="button">↻ Apply recurring</button></form>
+      <button class="button accent" onclick="generateAIWeek(this)" {{ '' if ai_enabled else 'disabled' }}>✨ Optimize week with AI</button>
+    </div>
+  </div>
+  <div class="nutrition-strip">
+    <div><span>Avg kcal/day</span><strong>{{ weekly_avg.calories|round|int }}</strong>{% if settings.calorie_target %}<small>target {{ settings.calorie_target }}</small>{% endif %}</div>
+    <div><span>Avg protein/day</span><strong>{{ weekly_avg.protein }}g</strong>{% if settings.protein_target %}<small>target {{ settings.protein_target }}g</small>{% endif %}</div>
+    <div><span>Avg fiber/day</span><strong>{{ weekly_avg.fiber }}g</strong>{% if settings.fiber_target %}<small>target {{ settings.fiber_target }}g</small>{% endif %}</div>
+    <div><span>Avg sat. fat/day</span><strong>{{ weekly_avg.saturated_fat }}g</strong>{% if settings.saturated_fat_limit %}<small>limit {{ settings.saturated_fat_limit }}g</small>{% endif %}</div>
+  </div>
+  <p class="tiny muted">Nutrition values are approximate per-person averages from saved recipe nutrition. Custom meals with no nutrition data are not counted.</p>
+  <div class="planner-grid">
+    {% for day in days %}
+    <article class="day-card">
+      <h3>{{ day.strftime('%a') }} <span>{{ day.strftime('%-m/%-d') }}</span></h3>
+      {% for meal_type in meal_types %}
+        {% set entry = plan.get((day.isoformat(), meal_type)) %}
+        <div class="meal-slot {{ 'leftover' if entry and entry.is_leftover else '' }}">
+          <div class="meal-label">{{ meal_type }}</div>
+          {% if entry %}
+            <strong>{{ entry.display_name }}</strong>
+            {% if entry.is_leftover %}<span class="pill leftover-pill">Leftovers</span>{% endif %}
+            <div class="macro-line">{% if entry.calories is not none %}{{ entry.calories }} kcal{% endif %}{% if entry.protein is not none %} · {{ '%g'|format(entry.protein) }}g P{% endif %}{% if entry.fiber is not none %} · {{ '%g'|format(entry.fiber) }}g fiber{% endif %}</div>
+            <div class="tiny muted">{{ '%g'|format(entry.servings) }} servings{% if entry.notes %} · {{ entry.notes }}{% endif %}</div>
+            <form method="post" action="/meal/delete"><input type="hidden" name="plan_date" value="{{ day.isoformat() }}"><input type="hidden" name="meal_type" value="{{ meal_type }}"><input type="hidden" name="week" value="{{ week_start.isoformat() }}"><button class="link-danger">Remove</button></form>
+          {% else %}<button class="add-link" onclick="openMealModal('{{ day.isoformat() }}','{{ meal_type }}')">+ Add meal</button>{% endif %}
+        </div>
+      {% endfor %}
+    </article>
+    {% endfor %}
+  </div>
+</section>
+
+<section id="grocery" class="panel two-col">
+  <div>
+    <div class="section-head">
+      <div><h2>Grocery list</h2><p class="muted">Generated quantities subtract matching pantry stock. Leftover meals are not purchased twice.</p></div>
+      <form method="post" action="/grocery/regenerate"><input type="hidden" name="week" value="{{ week_start.isoformat() }}"><button class="button">↻ Rebuild list</button></form>
+    </div>
+    <div class="budget-card">
+      <div><span>Estimated remaining</span><strong>${{ '%.2f'|format(grocery_total) }}</strong></div>
+      {% if settings.budget_weekly %}<div><span>Weekly budget</span><strong>${{ '%.2f'|format(settings.budget_weekly) }}</strong><small class="{{ 'over' if grocery_total > settings.budget_weekly else 'under' }}">{{ '$%.2f over'|format(grocery_total-settings.budget_weekly) if grocery_total > settings.budget_weekly else '$%.2f available'|format(settings.budget_weekly-grocery_total) }}</small></div>{% endif %}
+    </div>
+    <div class="grocery-list">
+      {% if grocery %}
+        {% for item in grocery %}
+        <div class="grocery-row {{ 'done' if item.checked else '' }}">
+          <form method="post" action="/grocery/{{ item.id }}/toggle"><input type="hidden" name="week" value="{{ week_start.isoformat() }}"><button class="check">{{ '✓' if item.checked else '○' }}</button></form>
+          <div class="grow"><strong>{{ item.item|title }}</strong><div class="muted tiny">{{ item.category }} · {{ item.source }}</div></div>
+          <span class="qty">{% if item.quantity is not none %}{{ '%g'|format(item.quantity) }}{% endif %} {{ item.unit }}</span>
+          <span class="cost">{% if item.estimated_cost is not none %}${{ '%.2f'|format(item.estimated_cost) }}{% else %}—{% endif %}</span>
+          <form method="post" action="/grocery/{{ item.id }}/delete"><input type="hidden" name="week" value="{{ week_start.isoformat() }}"><button class="x">×</button></form>
+        </div>
+        {% endfor %}
+      {% else %}<div class="empty">No groceries yet. Add meals, then rebuild the list.</div>{% endif %}
+    </div>
+  </div>
+  <div class="side-stack">
+    <div class="subpanel">
+      <h3>Add grocery item</h3>
+      <form method="post" action="/grocery/add" class="stack">
+        <input type="hidden" name="week" value="{{ week_start.isoformat() }}">
+        <label>Item<input name="item" required placeholder="Bananas"></label>
+        <div class="row"><label>Quantity<input name="quantity" type="number" step="0.01" placeholder="6"></label><label>Unit<input name="unit" placeholder="each"></label></div>
+        <div class="row"><label>Category<select name="category">{% for c in categories %}<option>{{ c }}</option>{% endfor %}</select></label><label>Estimated total $<input name="estimated_cost" type="number" step="0.01"></label></div>
+        <button class="button accent">Add item</button>
+      </form>
+    </div>
+    <div class="subpanel">
+      <h3>Local price book</h3><p class="tiny muted">Use the same item + unit as recipe ingredients. Cost = quantity × unit price.</p>
+      <form method="post" action="/prices/add" class="stack compact"><input type="hidden" name="week" value="{{ week_start.isoformat() }}"><div class="row"><label>Item<input name="item" required placeholder="chicken breast"></label><label>Unit<input name="unit" placeholder="lb"></label></div><div class="row"><label>$/unit<input type="number" step="0.01" min="0" name="unit_price" required></label><label>Store<input name="store" placeholder="optional"></label></div><button class="button">Save price</button></form>
+      <div class="mini-list">{% for p in prices %}<div><span>{{ p.item|title }} / {{ p.unit or 'unit' }} — ${{ '%.2f'|format(p.unit_price) }}{% if p.store %} · {{ p.store }}{% endif %}</span><form method="post" action="/prices/{{ p.id }}/delete"><input type="hidden" name="week" value="{{ week_start.isoformat() }}"><button class="x small">×</button></form></div>{% else %}<span class="tiny muted">No prices saved yet.</span>{% endfor %}</div>
+    </div>
+  </div>
+</section>
+
+<section id="pantry" class="panel two-col">
+  <div>
+    <h2>Pantry inventory</h2><p class="muted">Matching item + unit quantities are subtracted when the grocery list is rebuilt.</p>
+    <div class="inventory-grid">{% for p in pantry %}<div class="inventory-item"><div><span class="pill">{{ p.category }}</span><strong>{{ p.item|title }}</strong><span>{{ '%g'|format(p.quantity) if p.quantity is not none else '?' }} {{ p.unit }}</span>{% if p.notes %}<small>{{ p.notes }}</small>{% endif %}</div><form method="post" action="/pantry/{{ p.id }}/delete"><input type="hidden" name="week" value="{{ week_start.isoformat() }}"><button class="x">×</button></form></div>{% else %}<div class="empty">Add staples and ingredients you already have.</div>{% endfor %}</div>
+  </div>
+  <div class="subpanel"><h3>Add / update pantry item</h3><form method="post" action="/pantry/add" class="stack"><input type="hidden" name="week" value="{{ week_start.isoformat() }}"><label>Item<input name="item" required placeholder="brown rice"></label><div class="row"><label>Quantity<input type="number" step="0.01" name="quantity"></label><label>Unit<input name="unit" placeholder="cup cooked"></label></div><label>Category<select name="category">{% for c in categories %}<option>{{ c }}</option>{% endfor %}</select></label><label>Notes<input name="notes" placeholder="freezer, opened bag, etc."></label><button class="button accent">Save pantry item</button></form></div>
+</section>
+
+<section id="recurring" class="panel two-col">
+  <div><h2>Recurring meals</h2><p class="muted">Set dependable weekly anchors—like taco Friday or the same breakfast on weekdays.</p><div class="mini-list roomy">{% for r in recurring %}<div><span><strong>{{ weekdays[r.weekday] }} · {{ r.meal_type }}</strong> — {{ r.recipe_name }} · {{ '%g'|format(r.servings) }} servings{% if r.notes %}<small>{{ r.notes }}</small>{% endif %}</span><form method="post" action="/recurring/{{ r.id }}/delete"><input type="hidden" name="week" value="{{ week_start.isoformat() }}"><button class="x">×</button></form></div>{% else %}<div class="empty">No recurring meals yet.</div>{% endfor %}</div></div>
+  <div class="subpanel"><h3>Add recurring meal</h3><form method="post" action="/recurring/add" class="stack"><input type="hidden" name="week" value="{{ week_start.isoformat() }}"><div class="row"><label>Day<select name="weekday">{% for name in weekdays %}<option value="{{ loop.index0 }}">{{ name }}</option>{% endfor %}</select></label><label>Meal<select name="meal_type">{% for m in meal_types %}<option>{{ m }}</option>{% endfor %}</select></label></div><label>Recipe<select name="recipe_id" required>{% for r in recipes %}<option value="{{ r.id }}">{{ r.name }}</option>{% endfor %}</select></label><label>Servings<input type="number" name="servings" step="0.25" min="0.25" value="{{ settings.servings }}"></label><label>Notes<input name="notes" placeholder="prep double, family night, etc."></label><button class="button accent">Save recurring meal</button></form></div>
+</section>
+
+<section id="recipes" class="panel">
+  <div class="section-head"><div><h2>Recipe library</h2><p class="muted">Create recipes manually, import compatible recipe pages, or ask AI to create one around your household settings.</p></div><button class="button" onclick="toggle('recipe-form')">+ New recipe</button></div>
+  <div class="recipe-tools">
+    <form method="post" action="/recipes/import" class="tool-card"><input type="hidden" name="week" value="{{ week_start.isoformat() }}"><h3>Import from URL</h3><p class="tiny muted">Works best with sites exposing Schema.org Recipe JSON-LD.</p><div class="tool-row"><input type="url" name="url" required placeholder="https://example.com/recipe"><button class="button">Import</button></div></form>
+    <div class="tool-card"><h3>Generate with AI</h3><p class="tiny muted">The generated recipe is saved directly to your library.</p><div class="row"><select id="ai-recipe-type">{% for m in meal_types %}<option>{{ m }}</option>{% endfor %}</select><input id="ai-recipe-servings" type="number" min="1" value="{{ settings.servings }}" title="Servings"></div><div class="tool-row"><input id="ai-recipe-request" placeholder="High-fiber Mediterranean dinner under 30 minutes" {{ '' if ai_enabled else 'disabled' }}><button class="button accent" onclick="generateAIRecipe(this)" {{ '' if ai_enabled else 'disabled' }}>Create</button></div></div>
+  </div>
+  <form id="recipe-form" method="post" action="/recipes" class="recipe-form hidden">
+    <input type="hidden" name="week" value="{{ week_start.isoformat() }}"><label>Name<input name="name" required></label>
+    <div class="row"><label>Meal type<select name="meal_type">{% for m in meal_types %}<option>{{ m }}</option>{% endfor %}</select></label><label>Servings<input type="number" name="servings" value="4" min="1"></label><label>Prep min<input type="number" name="prep_minutes" value="10" min="0"></label><label>Cook min<input type="number" name="cook_minutes" value="20" min="0"></label></div>
+    <div class="row"><label>Calories<input type="number" name="calories"></label><label>Protein g<input type="number" step="0.1" name="protein"></label><label>Fiber g<input type="number" step="0.1" name="fiber"></label><label>Sat. fat g<input type="number" step="0.1" name="saturated_fat"></label></div>
+    <label>Ingredients<textarea name="ingredients" rows="5" placeholder="chicken breast | 1.5 | lb | Meat&#10;bell peppers | 3 | each | Produce"></textarea></label><label>Instructions<textarea name="instructions" rows="4"></textarea></label><label>Tags<input name="tags" placeholder="mediterranean,quick,meal-prep"></label><button class="button accent">Save recipe</button>
+  </form>
+  <div class="recipe-cards">{% for r in recipes %}<article class="recipe-card"><div class="recipe-title"><div><span class="pill">{{ r.meal_type }}</span><h3>{{ r.name }}</h3></div><form method="post" action="/recipes/{{ r.id }}/delete" onsubmit="return confirm('Delete this recipe?')"><input type="hidden" name="week" value="{{ week_start.isoformat() }}"><button class="x">×</button></form></div><p class="muted">{{ r.prep_minutes + r.cook_minutes }} min · {{ r.servings }} servings{% if r.calories is not none %} · {{ r.calories }} kcal{% endif %}{% if r.protein is not none %} · {{ r.protein|round|int }}g protein{% endif %}{% if r.fiber is not none %} · {{ '%g'|format(r.fiber) }}g fiber{% endif %}</p>{% if r.tags %}<p class="tiny">{{ r.tags }}</p>{% endif %}<details><summary>Ingredients & instructions</summary><ul>{% for i in r.ingredients %}<li>{{ i.item }}{% if i.quantity is not none %} — {{ '%g'|format(i.quantity) }} {{ i.unit }}{% endif %}</li>{% endfor %}</ul><p class="instructions">{{ r.instructions }}</p>{% if r.source_url %}<a class="source-link" href="{{ r.source_url }}" target="_blank" rel="noopener noreferrer">Source recipe ↗</a>{% endif %}</details></article>{% endfor %}</div>
+</section>
+
+<section id="dietitian" class="panel two-col ai-section">
+  <div><h2>AI dietitian</h2><p class="muted">The assistant can see this week’s plan plus your household settings, pantry and recurring meal rules.</p><div id="chat" class="chat"><div class="bubble assistant">Hi! I can help improve this week’s plan, use what is already in your pantry, or suggest practical nutrition tradeoffs.</div></div><div class="chat-input"><textarea id="chat-message" rows="2" placeholder="Make this week higher in fiber without adding much prep time." {{ '' if ai_enabled else 'disabled' }}></textarea><button class="button accent" onclick="sendChat()" {{ '' if ai_enabled else 'disabled' }}>Send</button></div>{% if not ai_enabled %}<div class="notice">AI is offline. Add your API key to <code>.env</code> and restart Docker. All non-AI features still work.</div>{% endif %}</div>
+  <aside class="subpanel"><h3>Try asking</h3><button class="prompt" onclick="usePrompt(this)">Make this week more heart-healthy.</button><button class="prompt" onclick="usePrompt(this)">Use more of what is already in my pantry.</button><button class="prompt" onclick="usePrompt(this)">Increase protein while keeping saturated fat down.</button><button class="prompt" onclick="usePrompt(this)">How can I bring the grocery estimate under budget?</button><p class="tiny muted">For education and planning. It does not diagnose or replace medical care.</p></aside>
+</section>
+
+<section id="settings" class="panel"><h2>Household & nutrition settings</h2><form method="post" action="/settings" class="settings-grid"><input type="hidden" name="week" value="{{ week_start.isoformat() }}"><label>Household name<input name="household_name" value="{{ settings.household_name }}"></label><label>Default servings<input type="number" name="servings" min="1" value="{{ settings.servings }}"></label><label>Calories / day<input type="number" name="calorie_target" value="{{ settings.calorie_target or '' }}" placeholder="optional"></label><label>Protein g / day<input type="number" name="protein_target" value="{{ settings.protein_target or '' }}" placeholder="optional"></label><label>Fiber g / day<input type="number" name="fiber_target" value="{{ settings.fiber_target or '' }}" placeholder="optional"></label><label>Saturated fat max g / day<input type="number" step="0.1" name="saturated_fat_limit" value="{{ settings.saturated_fat_limit or '' }}" placeholder="optional"></label><label>Weekly grocery budget $<input type="number" step="0.01" name="budget_weekly" value="{{ settings.budget_weekly or '' }}"></label><label>Diet style<input name="diet_style" value="{{ settings.diet_style }}" placeholder="Mediterranean, vegetarian, etc."></label><label class="span2">Allergies / foods to avoid<input name="allergies" value="{{ settings.allergies }}"></label><label class="span2">Dislikes<input name="dislikes" value="{{ settings.dislikes }}"></label><label class="span2">Health & nutrition goals<textarea name="health_goals" rows="3" placeholder="e.g., more fiber, less saturated fat, steady energy">{{ settings.health_goals }}</textarea></label><label class="span2">Planning notes<textarea name="notes" rows="3" placeholder="Busy Tuesdays, tacos on Friday, leftovers for lunch, etc.">{{ settings.notes }}</textarea></label><div class="span2"><button class="button accent">Save settings</button></div></form></section>
+</main>
+
+<div id="meal-modal" class="modal hidden" onclick="if(event.target===this)closeMealModal()"><div class="modal-card"><button class="modal-x" onclick="closeMealModal()">×</button><h3>Add meal</h3><form method="post" action="/meal" class="stack"><input type="hidden" id="meal-date" name="plan_date"><input type="hidden" id="meal-type" name="meal_type"><input type="hidden" name="week" value="{{ week_start.isoformat() }}"><div id="meal-modal-label" class="muted"></div><label>Saved recipe<select name="recipe_id"><option value="">— Custom meal —</option>{% for r in recipes %}<option value="{{ r.id }}">{{ r.meal_type }} · {{ r.name }}</option>{% endfor %}</select></label><label>Custom meal name<input name="custom_name" placeholder="Use this if not selecting a recipe"></label><label>Servings<input type="number" step="0.25" min="0.25" name="servings" value="{{ settings.servings }}"></label><label>Notes<input name="notes" placeholder="eat out, prep extra, etc."></label><label class="checkbox"><input type="checkbox" name="is_leftover" value="1"><span>Use leftovers — do not add this meal’s ingredients to groceries</span></label><button class="button accent">Add to plan</button></form></div></div>
+<script>window.APP_WEEK='{{ week_start.isoformat() }}'; window.AI_ENABLED={{ 'true' if ai_enabled else 'false' }};</script><script src="/static/app.js"></script>
+</body></html>
